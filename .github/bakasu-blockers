@@ -1,0 +1,6 @@
+# 格式: <BakaSU 提交>|<原因>
+# 登记「本内核树暂时跟不上」的上游提交：命中后 bakasu-sync 会跳过编译并在摘要里说明原因。
+# 上游 448eaca2（2026-11-15, PR #646）起要求内核里有 ksu_handle_vfs_fstat inline hook（Android 17 需要），
+# 本机是 4.19 + SUSFS v2.3.0（非 GKI）补丁，fs/stat.c 只有 ksu_handle_stat，没有 vfs_fstat。
+# 等内核侧 SUSFS 补丁栈升级带上 vfs_fstat hook 后，删掉下面这行即可继续跟进 main。
+448eaca200e51bc689ce9f09c48b11f1cd74261e|上游 448eaca2 起要求内核有 ksu_handle_vfs_fstat inline hook；本内核 4.19 + SUSFS v2.3.0 补丁缺该 hook，需先升级 SUSFS 补丁栈
