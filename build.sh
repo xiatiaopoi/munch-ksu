@@ -118,12 +118,13 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 if [ $KSU_ENABLE -eq 1 ]; then
     echo "KSU is enabled (BakaSU)"
     # ReSukiSU 已更名为 BakaSU（同一项目，仓库迁移至 Baka-SU/BakaSU）。
-    # 锁定到固定 commit（2026-10-24 main）以保证构建可复现。
+    # 默认锁定到固定 commit（2026-10-24 main）以保证本地构建可复现；
+    # CI 的 bakasu-sync 工作流会用环境变量 BAKASU_COMMIT 传入上游最新提交，
+    # 只有编译成功后才把这里的默认值改成该提交（见 .github/workflows/bakasu-sync.yml）。
     # 该版本已合入 PR #637（Sync upstream），移除了 susfs_compat.mk 中
     # 「Please wait susfs update」的编译期硬门闩，4.19 + SUSFS v2.3.0 可正常编译。
-    # Update BAKASU_COMMIT when bumping BakaSU.
     # 上游 setup.sh 会在 drivers/ 下建立 kernelsu 软链接，并追加 CONFIG_KSU 的 Makefile/Kconfig 条目。
-    BAKASU_COMMIT=d5e9e025b8b49155f8014684d64c91742b465f65
+    BAKASU_COMMIT="${BAKASU_COMMIT:-d5e9e025b8b49155f8014684d64c91742b465f65}"
     curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s "$BAKASU_COMMIT"
 
     # BakaSU 上游 sucompat 的 SUSFS 版 ksu_handle_faccessat 仍缺少 uid 校验，
