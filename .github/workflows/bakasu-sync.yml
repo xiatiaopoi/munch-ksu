@@ -236,6 +236,8 @@ jobs:
           files: all_kernels/*.zip
 
       - name: Bump BAKASU_COMMIT in build.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PINNED="${{ needs.check.outputs.pinned }}"
           TARGET="${{ needs.check.outputs.target }}"
@@ -249,7 +251,37 @@ jobs:
           git config user.email "bakasu-sync@users.noreply.github.com"
           git add build.sh
           git commit -m "chore(bakasu): bump BAKASU_COMMIT to $(echo "$TARGET" | cut -c1-8) [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          if git push origin "HEAD:${{ github.ref_name }}"; then
+            echo "已通过 git push 更新固定值"
+            exit 0
+          fi
+          echo "git push 失败，回退到 Contents API 更新" >&2
+          git checkout -- build.sh || true
+          python3 - "$PINNED" "$TARGET" <<'PY'
+          import base64, json, os, sys, urllib.error, urllib.request
+          pinned, target = sys.argv[1], sys.argv[2]
+          repo, branch = os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_REF_NAME']
+          api = f"https://api.github.com/repos/{repo}/contents/build.sh"
+          hdr = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          data = json.load(urllib.request.urlopen(urllib.request.Request(f"{api}?ref={branch}", headers=hdr)))
+          text = base64.b64decode(data['content']).decode()
+          if pinned not in text:
+              sys.exit(f"build.sh 里找不到 {pinned}")
+          body = json.dumps({
+              "message": f"chore(bakasu): bump BAKASU_COMMIT to {target[:8]} [skip ci]",
+              "content": base64.b64encode(text.replace(pinned, target, 1).encode()).decode(),
+              "branch": branch,
+              "sha": data['sha'],
+          }).encode()
+          req = urllib.request.Request(api, data=body, method='PUT',
+                                       headers={**hdr, "Content-Type": "application/json"})
+          try:
+              resp = json.load(urllib.request.urlopen(req))
+              print("API 更新成功:", resp['content']['sha'])
+          except urllib.error.HTTPError as e:
+              print(e.read().decode()[:800])
+              raise
+          PY
 
       - name: Summary
         run: |
