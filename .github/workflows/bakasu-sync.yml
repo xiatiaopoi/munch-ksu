@@ -1,0 +1,216 @@
+# 让 munch 内核里的 BakaSU（Baka-SU/BakaSU）保持最新：
+#   1. 定时检查上游 main 最新提交；
+#   2. 与 build.sh 里固定的 BAKASU_COMMIT 不同才真正编译（省 CI 时间）；
+#   3. MIUI / AOSP 两个变体都编集成 BakaSU 的版本；
+#   4. 全部编译成功后才发布 Release，并把 build.sh 的 BAKASU_COMMIT 更新为这次编译的提交。
+# 因为先编译再改固定值，上游改坏的时候只会本次不更新，不会污染仓库。
+name: bakasu-sync
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # UTC 18:00 = 北京时间 02:00
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '上游没有新提交也强制编译'
+        type: boolean
+        default: false
+      variant:
+        description: '编译哪个变体（both = MIUI + AOSP）'
+        type: choice
+        options:
+          - both
+          - miui
+          - aosp
+        default: both
+      update_pin:
+        description: '编译成功后发布 Release 并更新 build.sh 的 BAKASU_COMMIT'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bakasu-sync
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check upstream BakaSU
+    runs-on: ubuntu-24.04
+    outputs:
+      latest: ${{ steps.ref.outputs.latest }}
+      pinned: ${{ steps.ref.outputs.pinned }}
+      need_build: ${{ steps.ref.outputs.need_build }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve BakaSU main head vs pinned commit
+        id: ref
+        run: |
+          LATEST=$(git ls-remote https://github.com/Baka-SU/BakaSU.git refs/heads/main | cut -f1)
+          PINNED=$(grep 'BAKASU_COMMIT' build.sh | grep -oE '[0-9a-f]{40}' | head -n1)
+          if [ -z "$LATEST" ] || [ -z "$PINNED" ]; then
+            echo "无法解析 BakaSU 上游或本地固定提交 (latest='$LATEST' pinned='$PINNED')" >&2
+            exit 1
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          {
+            echo "### BakaSU 版本检查"
+            echo ""
+            echo "- 上游 main: \`$LATEST\`"
+            echo "- build.sh 固定: \`$PINNED\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$LATEST" != "$PINNED" ] || [ "${{ github.event.inputs.force }}" = "true" ]; then
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+            echo "- 需要编译：是" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+            echo "- 需要编译：否（已是最新）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    name: Build munch | ${{ matrix.variant }} | BakaSU
+    needs: check
+    if: needs.check.outputs.need_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ (github.event.inputs.variant == 'miui' && fromJSON('["miui"]')) || (github.event.inputs.variant == 'aosp' && fromJSON('["aosp"]')) || fromJSON('["miui","aosp"]') }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex gawk \
+            git gnupg gperf libncurses-dev \
+            lib32readline-dev lib32z1-dev lz4 \
+            libsdl1.2-dev libssl-dev libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python3 \
+            clang lld gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache_mikernel
+          key: ${{ runner.os }}-kernel-ccache-munch-${{ matrix.variant }}-bakasu-${{ needs.check.outputs.latest }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-munch-${{ matrix.variant }}-
+            ${{ runner.os }}-kernel-ccache-munch-
+            ${{ runner.os }}-kernel-ccache-
+
+      - name: Setup proton-clang Toolchain
+        run: |
+          TC="$HOME/proton-clang/proton-clang-20210522/bin"
+          mkdir -p "$TC"
+          cd "$TC"
+          ln -sf "$(command -v clang)" clang
+          ln -sf "$(command -v ld.lld)" ld.lld
+          for p in aarch64-linux-gnu arm-linux-gnueabi; do
+            for t in ld as ar nm objcopy objdump strip readelf gcc g++ cpp; do
+              if command -v $p-$t >/dev/null; then
+                ln -sf "$(command -v $p-$t)" "$p-$t"
+              fi
+            done
+          done
+          sudo ln -sf "$(command -v ccache)" /usr/lib/ccache/clang
+
+      - name: Run Build Script (BakaSU ${{ needs.check.outputs.latest }})
+        env:
+          BAKASU_COMMIT: ${{ needs.check.outputs.latest }}
+        run: |
+          chmod +x build.sh
+          echo "使用 BakaSU 提交: $BAKASU_COMMIT"
+          ./build.sh munch ksu ${{ matrix.variant }}
+
+      - name: Upload Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-munch-${{ matrix.variant }}-BakaSU-${{ needs.check.outputs.latest }}-${{ github.run_id }}
+          path: "*.zip"
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    name: Release + update BAKASU_COMMIT
+    needs: [check, build]
+    if: needs.check.outputs.need_build == 'true' && (github.event.inputs.update_pin == 'true' || github.event.inputs.update_pin == true || github.event_name == 'schedule')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_kernels
+          pattern: Kernel-*-${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Generate Release Info
+        id: vars
+        run: |
+          echo "BUILD_DATE=$(date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+          echo "SHORT=$(echo '${{ needs.check.outputs.latest }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
+          echo "TAG=bakasu-$(date +'%Y%m%d')-$(echo '${{ needs.check.outputs.latest }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
+          ls -l all_kernels
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.TAG }}
+          name: "munch BakaSU ${{ steps.vars.outputs.BUILD_DATE }} (${{ steps.vars.outputs.SHORT }})"
+          body: |
+            ## munch 内核（集成最新 BakaSU）/ Automated BakaSU Kernel Release
+
+            - **BakaSU 提交 / BakaSU commit:** `${{ needs.check.outputs.latest }}`
+            - **构建日期 / Build date:** ${{ steps.vars.outputs.BUILD_DATE }}
+            - **设备 / Device:** `munch`（Redmi K40S / POCO F4）
+            - **上游 / Upstream:** https://github.com/Baka-SU/BakaSU/commit/${{ needs.check.outputs.latest }}
+
+            ### 刷机包列表 / ZIPs
+            - **MIUI 变体**：MIUI / HyperOS 专用（含 MIUI 面板与刷新率调整）
+            - **AOSP 变体**：第三方 AOSP ROM 专用（MIUI 机器刷入会黑屏）
+            - 两个变体都已集成 BakaSU + SUSFS。
+          files: all_kernels/*.zip
+
+      - name: Bump BAKASU_COMMIT in build.sh
+        run: |
+          PINNED="${{ needs.check.outputs.pinned }}"
+          LATEST="${{ needs.check.outputs.latest }}"
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "build.sh 已是 $LATEST，无需改动"
+            exit 0
+          fi
+          sed -i "s/$PINNED/$LATEST/" build.sh
+          grep 'BAKASU_COMMIT' build.sh
+          git config user.name "bakasu-sync[bot]"
+          git config user.email "bakasu-sync@users.noreply.github.com"
+          git add build.sh
+          git commit -m "chore(bakasu): bump BAKASU_COMMIT to ${LATEST:0:8} [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### 结果"
+            echo ""
+            echo "- BakaSU 上游: \`${{ needs.check.outputs.latest }}\`"
+            echo "- 之前固定: \`${{ needs.check.outputs.pinned }}\`"
+            echo "- Release: ${{ steps.vars.outputs.TAG }}"
+          } >> "$GITHUB_STEP_SUMMARY"
