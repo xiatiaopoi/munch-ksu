@@ -124,7 +124,7 @@ if [ $KSU_ENABLE -eq 1 ]; then
     # 该版本已合入 PR #637（Sync upstream），移除了 susfs_compat.mk 中
     # 「Please wait susfs update」的编译期硬门闩，4.19 + SUSFS v2.3.0 可正常编译。
     # 上游 setup.sh 会在 drivers/ 下建立 kernelsu 软链接，并追加 CONFIG_KSU 的 Makefile/Kconfig 条目。
-    BAKASU_COMMIT="${BAKASU_COMMIT:-d5e9e025b8b49155f8014684d64c91742b465f65}"
+    BAKASU_COMMIT="${BAKASU_COMMIT:-548d1dda060ca198823d8808804d01f5209ef4a9}"
     curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s "$BAKASU_COMMIT"
 
     # BakaSU 上游 sucompat 的 SUSFS 版 ksu_handle_faccessat 仍缺少 uid 校验，
