@@ -1,0 +1,64 @@
+# 一次性运维：以开发上游 fuxue-linkong/kernel_xiaomi_sm8250_mod 的最新提交为新基线，
+# 迁到指定分支（历史与当前导入快照无关，属于整体替换树 + 保留本地 CI 文件）。
+name: adopt-upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: '新分支名'
+        required: true
+        default: susfs240
+      bakasu_commit:
+        description: 'build.sh 里固定的 BakaSU 提交（留空 = 沿用上游值）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  adopt:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild branch on upstream head
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/fuxue-linkong/kernel_xiaomi_sm8250_mod.git
+          git fetch --no-tags upstream android15-lineage22-mod
+          UP=$(git rev-parse upstream/android15-lineage22-mod)
+          echo "上游 head: $UP"
+          git checkout -B work "$UP"
+
+          # 保留本地 CI 文件（上游没有这两个文件，不会冲突）
+          git checkout origin/android15-lineage22-mod -- .github/workflows/bakasu-sync.yml 2>/dev/null || echo "bakasu-sync.yml 未取到"
+          git checkout origin/android15-lineage22-mod -- .github/bakasu-blockers 2>/dev/null || echo "blockers 未取到"
+
+          # build.sh: 让 BAKASU_COMMIT 可被环境变量覆盖
+          sed -i 's/^\(\s*\)BAKASU_COMMIT=\([0-9a-f]\{40\}\)/\1BAKASU_COMMIT="${BAKASU_COMMIT:-\2}"/' build.sh
+          PIN="${{ github.event.inputs.bakasu_commit }}"
+          if [ -n "$PIN" ]; then
+            sed -i "s/\(BAKASU_COMMIT=\"\${BAKASU_COMMIT:-\)[0-9a-f]\{40\}/\1$PIN/" build.sh
+          fi
+          grep -n 'BAKASU_COMMIT' build.sh | head -5
+
+          # vfs_fstat 挂点已经在上游树里，清空阻断清单内容（保留文件与说明头）
+          if [ -f .github/bakasu-blockers ]; then
+            printf '%s\n' '# 格式: <BakaSU 提交>|<原因>' '# 当前基线已带 ksu_handle_vfs_fstat 挂点，暂无阻断项。' > .github/bakasu-blockers
+          fi
+
+          echo "==== fs/stat.c hook ===="
+          grep -n 'ksu_handle_vfs_fstat' fs/stat.c | head -5
+          echo "==== SUSFS 版本 ===="
+          grep -rn 'SUSFS_VERSION' fs/susfs.c include/linux/susfs.h 2>/dev/null | head -5
+
+          git add -A
+          git commit -m "base: adopt fuxue-linkong android15-lineage22-mod $(echo $UP | cut -c1-8) (SUSFS v2.4.0 + vfs_fstat hook) [skip ci]" || echo "无改动"
+          git push origin HEAD:refs/heads/${{ github.event.inputs.target_branch }} --force
+          echo "已推送分支 ${{ github.event.inputs.target_branch }}"
