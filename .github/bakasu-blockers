@@ -1,0 +1,2 @@
+# 格式: <BakaSU 提交>|<原因>
+# 当前基线已带 ksu_handle_vfs_fstat 挂点，暂无阻断项。

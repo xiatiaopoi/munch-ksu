@@ -126,7 +126,7 @@ if [ $KSU_ENABLE -eq 1 ]; then
     # - patch_sucompat.py 锚点已对新版 sucompat.c 核验，仍精确匹配。
     # Update BAKASU_COMMIT when bumping BakaSU.
     # 上游 setup.sh 会在 drivers/ 下建立 kernelsu 软链接，并追加 CONFIG_KSU 的 Makefile/Kconfig 条目。
-    BAKASU_COMMIT=7b65bde0710b5e7c6f755545cb15a4abd417f3a8
+    BAKASU_COMMIT="${BAKASU_COMMIT:-7b65bde0710b5e7c6f755545cb15a4abd417f3a8}"
     curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s "$BAKASU_COMMIT"
 
     # BakaSU 上游 sucompat 的 SUSFS 版 ksu_handle_faccessat 仍缺少 uid 校验，
