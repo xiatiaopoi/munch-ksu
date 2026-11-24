@@ -41,7 +41,8 @@ jobs:
           # 保留阻断清单（非工作流文件）
           git checkout origin/android15-lineage22-mod -- .github/bakasu-blockers 2>/dev/null || echo "blockers 未取到"
           # 上游带来的工作流留在树上没问题，但本仓库的工作流文件不放进这次提交
-          rm -f .github/workflows/bakasu-sync.yml
+          rm -rf .github/workflows
+          echo "已移除 .github/workflows，工作流随后用 PAT 通过 Contents API 单独补"
 
           # build.sh: 让 BAKASU_COMMIT 可被环境变量覆盖
           sed -i 's/^\(\s*\)BAKASU_COMMIT=\([0-9a-f]\{40\}\)/\1BAKASU_COMMIT="${BAKASU_COMMIT:-\2}"/' build.sh
