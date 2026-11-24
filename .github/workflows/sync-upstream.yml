@@ -1,0 +1,73 @@
+# 一次性运维工作流：把开发上游 fuxue-linkong/kernel_xiaomi_sm8250_mod 合并进本仓库分支。
+# 冲突处理由输入决定：theirs = 冲突文件取上游版本（默认），ours = 保留本地。
+name: sync-upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: '冲突文件取哪一侧'
+        type: choice
+        options:
+          - theirs
+          - ours
+          - both
+        default: theirs
+      push:
+        description: '合并成功直接推送'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream branch
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/fuxue-linkong/kernel_xiaomi_sm8250_mod.git
+          git fetch --no-tags upstream android15-lineage22-mod
+          echo "本地: $(git rev-parse --short HEAD)  上游: $(git rev-parse --short upstream/android15-lineage22-mod)"
+          if git merge --no-fix -m "merge upstream android15-lineage22-mod [skip ci]" upstream/android15-lineage22-mod; then
+            echo "MERGED_CLEAN"
+          else
+            git diff --name-only --diff-filter=U | tee conflicts.txt
+            echo "冲突文件数: $(wc -l < conflicts.txt)"
+            STRATEGY="${{ github.event.inputs.strategy }}"
+            if [ "$STRATEGY" = "theirs" ] || [ "$STRATEGY" = "ours" ]; then
+              while read -r f; do
+                [ -n "$f" ] && git checkout --$STRATEGY -- "$f"
+              done < conflicts.txt
+              while read -r f; do
+                [ -n "$f" ] && git add "$f"
+              done < conflicts.txt
+              git commit -m "merge upstream android15-lineage22-mod (conflicts: $STRATEGY) [skip ci]"
+              echo "MERGED_WITH_CONFLICT_RESOLUTION"
+            else
+              echo "保留冲突标记，未提交"
+              exit 1
+            fi
+          fi
+          echo "==== 合并后最近 12 个提交 ===="
+          git log --oneline -12
+          echo "==== build.sh 关键行 ===="
+          grep -nE 'BAKASU_COMMIT|BUILD_TAG=' build.sh | head -10
+          echo "==== fs/stat.c hook ===="
+          grep -n 'ksu_handle_vfs_fstat' fs/stat.c | head -5
+          echo "==== SUSFS 版本 ===="
+          grep -rn 'SUSFS_VERSION' fs/susfs.c include/linux/susfs.h 2>/dev/null | head -5
+
+      - name: Push
+        if: github.event.inputs.push == 'true'
+        run: |
+          git push origin HEAD:android15-lineage22-mod
+          echo "已推送"
