@@ -1,5 +1,7 @@
 # 一次性运维：以开发上游 fuxue-linkong/kernel_xiaomi_sm8250_mod 的最新提交为新基线，
-# 迁到指定分支（历史与当前导入快照无关，属于整体替换树 + 保留本地 CI 文件）。
+# 迁到指定分支（历史与当前导入快照无关，属于整体替换树）。
+# 注意：GITHUB_TOKEN 不能推送包含 .github/workflows/* 的提交（缺 workflows 权限），
+# 所以本工作流只保留非工作流文件，工作流由外部用 PAT 单独补上。
 name: adopt-upstream
 
 on:
@@ -36,9 +38,10 @@ jobs:
           echo "上游 head: $UP"
           git checkout -B work "$UP"
 
-          # 保留本地 CI 文件（上游没有这两个文件，不会冲突）
-          git checkout origin/android15-lineage22-mod -- .github/workflows/bakasu-sync.yml 2>/dev/null || echo "bakasu-sync.yml 未取到"
+          # 保留阻断清单（非工作流文件）
           git checkout origin/android15-lineage22-mod -- .github/bakasu-blockers 2>/dev/null || echo "blockers 未取到"
+          # 上游带来的工作流留在树上没问题，但本仓库的工作流文件不放进这次提交
+          rm -f .github/workflows/bakasu-sync.yml
 
           # build.sh: 让 BAKASU_COMMIT 可被环境变量覆盖
           sed -i 's/^\(\s*\)BAKASU_COMMIT=\([0-9a-f]\{40\}\)/\1BAKASU_COMMIT="${BAKASU_COMMIT:-\2}"/' build.sh
@@ -48,7 +51,6 @@ jobs:
           fi
           grep -n 'BAKASU_COMMIT' build.sh | head -5
 
-          # vfs_fstat 挂点已经在上游树里，清空阻断清单内容（保留文件与说明头）
           if [ -f .github/bakasu-blockers ]; then
             printf '%s\n' '# 格式: <BakaSU 提交>|<原因>' '# 当前基线已带 ksu_handle_vfs_fstat 挂点，暂无阻断项。' > .github/bakasu-blockers
           fi
@@ -60,5 +62,6 @@ jobs:
 
           git add -A
           git commit -m "base: adopt fuxue-linkong android15-lineage22-mod $(echo $UP | cut -c1-8) (SUSFS v2.4.0 + vfs_fstat hook) [skip ci]" || echo "无改动"
+          git status --short | head -5
           git push origin HEAD:refs/heads/${{ github.event.inputs.target_branch }} --force
           echo "已推送分支 ${{ github.event.inputs.target_branch }}"
