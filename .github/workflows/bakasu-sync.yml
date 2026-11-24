@@ -1,18 +1,22 @@
-# 让 munch 内核里的 BakaSU（Baka-SU/BakaSU）保持最新：
+# 让 munch 内核里的 BakaSU（Baka-SU/BakaSU）保持更新：
 #   1. 定时检查上游 main 最新提交；
 #   2. 与 build.sh 里固定的 BAKASU_COMMIT 不同才真正编译（省 CI 时间）；
 #   3. MIUI / AOSP 两个变体都编集成 BakaSU 的版本；
-#   4. 全部编译成功后才发布 Release，并把 build.sh 的 BAKASU_COMMIT 更新为这次编译的提交。
-# 因为先编译再改固定值，上游改坏的时候只会本次不更新，不会污染仓库。
+#   4. 全部编译成功后才发布 Release，并把 build.sh 的 BAKASU_COMMIT 更新为这次编译的提交；
+#   5. .github/bakasu-blockers 登记本内核树暂时跟不上的上游提交，命中就跳过并说明原因。
 name: bakasu-sync
 
 on:
   schedule:
-    - cron: "0 18 * * *" # UTC 18:00 = 北京时间 02:00
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
+      ref:
+        description: '指定 BakaSU 提交/分支（留空 = 上游 main 最新）'
+        required: false
+        default: ''
       force:
-        description: '上游没有新提交也强制编译'
+        description: '和当前固定值相同也强制编译'
         type: boolean
         default: false
       variant:
@@ -40,38 +44,79 @@ jobs:
     name: Check upstream BakaSU
     runs-on: ubuntu-24.04
     outputs:
-      latest: ${{ steps.ref.outputs.latest }}
+      head: ${{ steps.ref.outputs.head }}
       pinned: ${{ steps.ref.outputs.pinned }}
+      target: ${{ steps.ref.outputs.target }}
       need_build: ${{ steps.ref.outputs.need_build }}
+      blocked: ${{ steps.ref.outputs.blocked }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Resolve BakaSU main head vs pinned commit
+      - name: Resolve BakaSU head, pinned commit and build target
         id: ref
         run: |
-          LATEST=$(git ls-remote https://github.com/Baka-SU/BakaSU.git refs/heads/main | cut -f1)
+          REPO=https://github.com/Baka-SU/BakaSU.git
+          HEAD_SHA=$(git ls-remote "$REPO" refs/heads/main | cut -f1)
           PINNED=$(grep 'BAKASU_COMMIT' build.sh | grep -oE '[0-9a-f]{40}' | head -n1)
-          if [ -z "$LATEST" ] || [ -z "$PINNED" ]; then
-            echo "无法解析 BakaSU 上游或本地固定提交 (latest='$LATEST' pinned='$PINNED')" >&2
+          REF="${{ github.event.inputs.ref }}"
+          if [ -z "$HEAD_SHA" ] || [ -z "$PINNED" ]; then
+            echo "无法解析 BakaSU 上游或本地固定提交 (head='$HEAD_SHA' pinned='$PINNED')" >&2
             exit 1
           fi
-          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$REF" ]; then
+            TARGET="$HEAD_SHA"
+          else
+            case "$REF" in
+              *[!0-9a-f]*) TARGET=$(git ls-remote "$REPO" "$REF" "refs/heads/$REF" "refs/tags/$REF^{}" "refs/tags/$REF" | head -n1 | cut -f1) ;;
+              *) TARGET="$REF" ;;
+            esac
+            if [ -z "$TARGET" ]; then
+              echo "无法解析指定的 BakaSU ref: $REF" >&2
+              exit 1
+            fi
+          fi
+
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+          BLOCKED=""
+          if [ "$TARGET" = "$HEAD_SHA" ] && [ "${{ github.event.inputs.force }}" != "true" ] && [ -f .github/bakasu-blockers ]; then
+            while IFS='|' read -r BSHA BNOTE; do
+              case "$BSHA" in ''|'#'*) continue ;; esac
+              STATUS=$(curl -s -m 30 "https://api.github.com/repos/Baka-SU/BakaSU/compare/$BSHA...$HEAD_SHA" | grep -o '"status": *"[a-z]*"' | head -n1 | sed 's/.*"\([a-z]*\)"$/\1/')
+              if [ "$STATUS" = "ahead" ] || [ "$STATUS" = "identical" ]; then
+                BLOCKED="$BNOTE"
+                break
+              fi
+            done < .github/bakasu-blockers
+          fi
+
           {
             echo "### BakaSU 版本检查"
             echo ""
-            echo "- 上游 main: \`$LATEST\`"
+            echo "- 上游 main: \`$HEAD_SHA\`"
             echo "- build.sh 固定: \`$PINNED\`"
+            echo "- 本次目标: \`$TARGET\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$LATEST" != "$PINNED" ] || [ "${{ github.event.inputs.force }}" = "true" ]; then
-            echo "need_build=true" >> "$GITHUB_OUTPUT"
-            echo "- 需要编译：是" >> "$GITHUB_STEP_SUMMARY"
-          else
+
+          if [ -n "$BLOCKED" ]; then
+            echo "blocked=$BLOCKED" >> "$GITHUB_OUTPUT"
             echo "need_build=false" >> "$GITHUB_OUTPUT"
-            echo "- 需要编译：否（已是最新）" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 跳过编译: $BLOCKED" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "blocked=" >> "$GITHUB_OUTPUT"
+            if [ "$TARGET" != "$PINNED" ] || [ "${{ github.event.inputs.force }}" = "true" ]; then
+              echo "need_build=true" >> "$GITHUB_OUTPUT"
+              echo "- 需要编译: 是" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "need_build=false" >> "$GITHUB_OUTPUT"
+              echo "- 需要编译: 否（已是最新）" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
   build:
@@ -106,7 +151,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache_mikernel
-          key: ${{ runner.os }}-kernel-ccache-munch-${{ matrix.variant }}-bakasu-${{ needs.check.outputs.latest }}
+          key: ${{ runner.os }}-kernel-ccache-munch-${{ matrix.variant }}-bakasu-${{ needs.check.outputs.target }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-munch-${{ matrix.variant }}-
             ${{ runner.os }}-kernel-ccache-munch-
@@ -128,9 +173,9 @@ jobs:
           done
           sudo ln -sf "$(command -v ccache)" /usr/lib/ccache/clang
 
-      - name: Run Build Script (BakaSU ${{ needs.check.outputs.latest }})
+      - name: Run Build Script (BakaSU ${{ needs.check.outputs.target }})
         env:
-          BAKASU_COMMIT: ${{ needs.check.outputs.latest }}
+          BAKASU_COMMIT: ${{ needs.check.outputs.target }}
         run: |
           chmod +x build.sh
           echo "使用 BakaSU 提交: $BAKASU_COMMIT"
@@ -139,7 +184,7 @@ jobs:
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-munch-${{ matrix.variant }}-BakaSU-${{ needs.check.outputs.latest }}-${{ github.run_id }}
+          name: Kernel-munch-${{ matrix.variant }}-BakaSU-${{ needs.check.outputs.target }}-${{ github.run_id }}
           path: "*.zip"
           compression-level: 0
           if-no-files-found: error
@@ -166,8 +211,8 @@ jobs:
         id: vars
         run: |
           echo "BUILD_DATE=$(date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
-          echo "SHORT=$(echo '${{ needs.check.outputs.latest }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
-          echo "TAG=bakasu-$(date +'%Y%m%d')-$(echo '${{ needs.check.outputs.latest }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
+          echo "SHORT=$(echo '${{ needs.check.outputs.target }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
+          echo "TAG=bakasu-$(date +'%Y%m%d')-$(echo '${{ needs.check.outputs.target }}' | cut -c1-8)" >> "$GITHUB_OUTPUT"
           ls -l all_kernels
 
       - name: Create GitHub Release
@@ -176,12 +221,13 @@ jobs:
           tag_name: ${{ steps.vars.outputs.TAG }}
           name: "munch BakaSU ${{ steps.vars.outputs.BUILD_DATE }} (${{ steps.vars.outputs.SHORT }})"
           body: |
-            ## munch 内核（集成最新 BakaSU）/ Automated BakaSU Kernel Release
+            ## munch 内核（集成 BakaSU）/ Automated BakaSU Kernel Release
 
-            - **BakaSU 提交 / BakaSU commit:** `${{ needs.check.outputs.latest }}`
+            - **BakaSU 提交 / BakaSU commit:** `${{ needs.check.outputs.target }}`
+            - **当时上游 main / upstream head:** `${{ needs.check.outputs.head }}`
             - **构建日期 / Build date:** ${{ steps.vars.outputs.BUILD_DATE }}
             - **设备 / Device:** `munch`（Redmi K40S / POCO F4）
-            - **上游 / Upstream:** https://github.com/Baka-SU/BakaSU/commit/${{ needs.check.outputs.latest }}
+            - **上游提交 / Upstream commit:** https://github.com/Baka-SU/BakaSU/commit/${{ needs.check.outputs.target }}
 
             ### 刷机包列表 / ZIPs
             - **MIUI 变体**：MIUI / HyperOS 专用（含 MIUI 面板与刷新率调整）
@@ -192,17 +238,17 @@ jobs:
       - name: Bump BAKASU_COMMIT in build.sh
         run: |
           PINNED="${{ needs.check.outputs.pinned }}"
-          LATEST="${{ needs.check.outputs.latest }}"
-          if [ "$PINNED" = "$LATEST" ]; then
-            echo "build.sh 已是 $LATEST，无需改动"
+          TARGET="${{ needs.check.outputs.target }}"
+          if [ "$PINNED" = "$TARGET" ]; then
+            echo "build.sh 已是 $TARGET，无需改动"
             exit 0
           fi
-          sed -i "s/$PINNED/$LATEST/" build.sh
+          sed -i "s/$PINNED/$TARGET/" build.sh
           grep 'BAKASU_COMMIT' build.sh
           git config user.name "bakasu-sync[bot]"
           git config user.email "bakasu-sync@users.noreply.github.com"
           git add build.sh
-          git commit -m "chore(bakasu): bump BAKASU_COMMIT to ${LATEST:0:8} [skip ci]"
+          git commit -m "chore(bakasu): bump BAKASU_COMMIT to $(echo "$TARGET" | cut -c1-8) [skip ci]"
           git push origin HEAD:${{ github.ref_name }}
 
       - name: Summary
@@ -210,7 +256,8 @@ jobs:
           {
             echo "### 结果"
             echo ""
-            echo "- BakaSU 上游: \`${{ needs.check.outputs.latest }}\`"
+            echo "- BakaSU 目标: \`${{ needs.check.outputs.target }}\`"
             echo "- 之前固定: \`${{ needs.check.outputs.pinned }}\`"
+            echo "- 上游 main: \`${{ needs.check.outputs.head }}\`"
             echo "- Release: ${{ steps.vars.outputs.TAG }}"
           } >> "$GITHUB_STEP_SUMMARY"
