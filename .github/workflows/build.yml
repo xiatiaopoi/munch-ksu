@@ -1,0 +1,109 @@
+name: Build Kernel
+
+on:
+  push:
+    branches: [ android15-lineage22-mod ]
+  pull_request:
+    branches: [ android15-lineage22-mod ]
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Kernel variant (MIUI / AOSP / both)'
+        required: true
+        type: choice
+        options:
+          - both
+          - miui
+          - aosp
+        default: both
+      ksu:
+        description: 'Enable KernelSU with SUSFS (BakaSU)'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  build-kernel:
+    name: Build elish | ${{ matrix.variant }} | ${{ github.event_name == 'push' && 'KSU' || (github.event.inputs.ksu == 'true' && 'KSU' || 'NoKSU') }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Push/PR always build both variants (the input is empty there);
+        # workflow_dispatch narrows the matrix to the requested variant.
+        variant: ${{ (github.event.inputs.variant == 'miui' && fromJSON('["miui"]')) || (github.event.inputs.variant == 'aosp' && fromJSON('["aosp"]')) || fromJSON('["miui","aosp"]') }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex gawk \
+            git gnupg gperf libncurses-dev \
+            lib32readline-dev lib32z1-dev lz4 \
+            libsdl1.2-dev libssl-dev libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python3 \
+            clang lld gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache_mikernel
+          key: ${{ runner.os }}-kernel-ccache-elish-${{ matrix.variant }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-elish-${{ matrix.variant }}-
+            ${{ runner.os }}-kernel-ccache-elish-
+            ${{ runner.os }}-kernel-ccache-
+
+      - name: Setup proton-clang Toolchain
+        run: |
+          TC="$HOME/proton-clang/proton-clang-20210522/bin"
+          mkdir -p "$TC"
+          cd "$TC"
+          ln -sf "$(command -v clang)" clang
+          ln -sf "$(command -v ld.lld)" ld.lld
+          for p in aarch64-linux-gnu arm-linux-gnueabi; do
+            for t in ld as ar nm objcopy objdump strip readelf gcc g++ cpp; do
+              if command -v $p-$t >/dev/null; then
+                ln -sf "$(command -v $p-$t)" "$p-$t"
+              fi
+            done
+          done
+          # Enable ccache for clang via PATH symlink
+          sudo ln -sf "$(command -v ccache)" /usr/lib/ccache/clang
+
+      - name: Run Build Script
+        run: |
+          chmod +x build.sh
+
+          ARGS="elish"
+
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
+            ARGS="$ARGS ksu"
+          elif [ "${{ github.event.inputs.ksu }}" = "true" ]; then
+            ARGS="$ARGS ksu"
+          fi
+
+          ARGS="$ARGS ${{ matrix.variant }}"
+
+          # Tag bpf-branch artifacts so they cannot be confused with the
+          # android15 ones; build.sh appends _BPF to the zip name.
+          if [ "${{ github.ref_name }}" = "backport-5.10-bpf" ]; then
+            ARGS="$ARGS BPF"
+          fi
+
+          echo "Executing command: ./build.sh $ARGS"
+          ./build.sh $ARGS
+
+      - name: Upload Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-elish-${{ matrix.variant }}-${{ github.event_name == 'push' && 'KSU' || (github.event.inputs.ksu == 'true' && 'KSU' || 'NoKSU') }}${{ (github.ref_name == 'backport-5.10-bpf' && '-BPF') || '' }}-${{ github.run_id }}
+          path: "*.zip"
+          compression-level: 0
+          if-no-files-found: ignore
